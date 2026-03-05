@@ -15,6 +15,7 @@ const TRANSITION_DURATION = parseFloat(process.env.TRANSITION_DURATION_SECONDS |
 interface VideoJob {
   sessionId: string;
   musicFiles: string[];
+  videoId?: string;
   plex?: {
     serverUri: string;
     token: string;
@@ -46,7 +47,7 @@ export class VideoGenerator {
       throw new Error('No photos selected for video');
     }
 
-    const videoId = uuidv4();
+    const videoId = job.videoId || uuidv4();
     const outputPath = path.join(OUTPUT_DIR, `${videoId}.mp4`);
     const tempDir = path.join(OUTPUT_DIR, videoId);
     
@@ -72,7 +73,7 @@ export class VideoGenerator {
 
       // Build ffmpeg command for slideshow
       console.log('Generating video...');
-      await this.buildSlideshow(preparedPhotos, audioPath, outputPath, job);
+      await this.buildSlideshow(preparedPhotos, audioPath, outputPath, job, tempDir);
 
       // Update video status
       const stats = fs.statSync(outputPath);
@@ -89,9 +90,12 @@ export class VideoGenerator {
       return outputPath;
 
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`Video generation error for ${videoId}:`, errorMessage);
+      
       database.prepare(`
-        UPDATE videos SET status = 'error' WHERE id = ?
-      `).run(videoId);
+        UPDATE videos SET status = 'error', error_message = ? WHERE id = ?
+      `).run(errorMessage.substring(0, 500), videoId);
       
       this.cleanup(tempDir);
       job.onError?.(error as Error);
@@ -109,9 +113,7 @@ export class VideoGenerator {
       // Copy and optimize photo
       await new Promise<void>((resolve, reject) => {
         ffmpeg(photo.downloaded_path)
-          .outputOptions([
-            '-vf scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black'
-          ])
+          .videoFilter('scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black')
           .frames(1)
           .output(outputPath)
           .on('end', () => resolve())
@@ -220,63 +222,116 @@ export class VideoGenerator {
     photos: string[], 
     audioPath: string, 
     outputPath: string,
-    job: VideoJob
+    job: VideoJob,
+    tempDir: string
   ): Promise<void> {
-    return new Promise((resolve, reject) => {
-      // Build complex filter for crossfade between images
-      let filterComplex = '';
-      let currentOverlay = '[0:v]';
+    // Use a two-pass approach to avoid filtergraph input limits:
+    // 1. Create individual segments for each photo with fade transitions
+    // 2. Concatenate segments together
+    
+    const segmentDir = path.resolve(tempDir, 'segments');
+    if (!fs.existsSync(segmentDir)) {
+      fs.mkdirSync(segmentDir, { recursive: true });
+    }
+    console.log('Segment directory:', segmentDir);
+
+    const segments: string[] = [];
+
+    // Create segment for each photo
+    for (let i = 0; i < photos.length; i++) {
+      const segmentPath = path.resolve(segmentDir, `segment_${i.toString().padStart(4, '0')}.mp4`);
       
-      for (let i = 0; i < photos.length - 1; i++) {
-        const next = i + 1;
+      await new Promise<void>((resolve, reject) => {
+        const isLast = i === photos.length - 1;
+        const duration = isLast ? PHOTO_DURATION : PHOTO_DURATION + TRANSITION_DURATION;
         
-        // Each image fades out over transition period
-        filterComplex += `[${i}:v]format=pix_fmts=yuv420p[f${i}];`;
-        
-        if (i === 0) {
-          filterComplex += `[f${i}][${next}:v]xfade=transition=fade:duration=${TRANSITION_DURATION}:offset=${PHOTO_DURATION}[v${next}];`;
-        } else {
-          filterComplex += `[v${i}][${next}:v]xfade=transition=fade:duration=${TRANSITION_DURATION}:offset=${(i + 1) * PHOTO_DURATION}[v${next}];`;
+        // For each segment: show photo for duration with fade out at end (except last)
+        let fadeFilter = `format=pix_fmts=yuv420p`;
+        if (!isLast) {
+          fadeFilter += `,fade=t=out:st=${PHOTO_DURATION}:d=${TRANSITION_DURATION}`;
         }
         
-        currentOverlay = `[v${next}]`;
-      }
+        ffmpeg(photos[i])
+          .loop(1)
+          .duration(duration)
+          .videoFilter(fadeFilter)
+          .outputOptions([
+            '-c:v libx264',
+            '-preset medium',
+            '-crf 23',
+            '-pix_fmt yuv420p',
+            '-movflags +faststart'
+          ])
+          .output(segmentPath)
+          .on('end', () => resolve())
+          .on('error', reject)
+          .run();
+      });
       
-      // Format final video
-      filterComplex += `${currentOverlay}format=pix_fmts=yuv420p[video];`;
+      segments.push(segmentPath);
+    }
+
+    // Build concat list file with absolute paths
+    const concatListPath = path.resolve(tempDir, 'video_concat.txt');
+    let concatContent = '';
+    for (const segment of segments) {
+      // Use absolute paths in concat file
+      const absPath = path.resolve(segment);
+      concatContent += `file '${absPath.replace(/'/g, "'\\''")}'\n`;
+    }
+    fs.writeFileSync(concatListPath, concatContent);
+    console.log('Created concat list:', concatListPath);
+    console.log('Concat content:', concatContent);
+
+    // Concatenate all segments with audio
+    return new Promise((resolve, reject) => {
+      const videoOnlyPath = path.resolve(tempDir, 'video_noaudio.mp4');
+      console.log('Video only path:', videoOnlyPath);
+      console.log('Final output path:', outputPath);
       
-      // Build inputs
-      const cmd = ffmpeg();
-      photos.forEach(photo => cmd.input(photo));
-      cmd.input(audioPath);
-      
-      cmd
-        .complexFilter(filterComplex, currentOverlay.replace(/[\[\]]/g, ''))
+      // First pass: concatenate segments (video only)
+      ffmpeg()
+        .input(concatListPath)
+        .inputOptions(['-f concat', '-safe 0'])
         .outputOptions([
-          '-map [video]',
-          '-map ' + photos.length + ':a',
           '-c:v libx264',
           '-preset medium',
           '-crf 23',
-          '-c:a aac',
-          '-b:a 192k',
-          '-shortest',
+          '-pix_fmt yuv420p',
           '-movflags +faststart'
         ])
-        .output(outputPath)
-        .on('start', (cmd) => {
-          console.log('FFmpeg command:', cmd);
-        })
-        .on('progress', (progress) => {
-          console.log('Processing: ' + progress.percent?.toFixed(2) + '% done');
-          job.onProgress?.(progress.percent || 0);
-        })
+        .output(videoOnlyPath)
         .on('end', () => {
-          console.log('Video created:', outputPath);
-          resolve();
+          // Second pass: add audio
+          ffmpeg(videoOnlyPath)
+            .input(audioPath)
+            .outputOptions([
+              '-c:v copy',
+              '-c:a aac',
+              '-b:a 192k',
+              '-shortest',
+              '-movflags +faststart'
+            ])
+            .output(outputPath)
+            .on('start', (cmd) => {
+              console.log('FFmpeg final pass command:', cmd);
+            })
+            .on('progress', (progress) => {
+              console.log('Processing: ' + progress.percent?.toFixed(2) + '% done');
+              job.onProgress?.(progress.percent || 0);
+            })
+            .on('end', () => {
+              console.log('Video created:', outputPath);
+              resolve();
+            })
+            .on('error', (err) => {
+              console.error('FFmpeg error:', err);
+              reject(err);
+            })
+            .run();
         })
         .on('error', (err) => {
-          console.error('FFmpeg error:', err);
+          console.error('FFmpeg concat error:', err);
           reject(err);
         })
         .run();

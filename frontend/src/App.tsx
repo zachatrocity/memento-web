@@ -11,6 +11,7 @@ function App() {
   const [uploadedMusic, setUploadedMusic] = useState<any[]>([]);
   const [selectedMusic, setSelectedMusic] = useState<string[]>([]);
   const [video, setVideo] = useState<any>(null);
+  const [videoError, setVideoError] = useState<string | null>(null);
   const [pickerSession, setPickerSession] = useState<any>(null);
   const [plexStatus, setPlexStatus] = useState<any>(null);
   const [plexPinId, setPlexPinId] = useState<string | null>(null);
@@ -369,9 +370,13 @@ function App() {
         const res = await fetch(`/api/video/status/${videoId}`, { credentials: 'include' });
         const data = await res.json();
         setVideo(data);
-        if (data.status === 'complete' || data.status === 'error') {
+        if (data.status === 'complete') {
           clearInterval(interval);
           setCurrentStep('complete');
+        } else if (data.status === 'error') {
+          clearInterval(interval);
+          setVideoError('Video generation failed. Please try again.');
+          setCurrentStep('error');
         }
       } catch (err) {
         console.error('Status poll failed:', err);
@@ -604,6 +609,23 @@ function App() {
             <p style={{ color: 'var(--text-muted)' }}>
               {video?.status === 'processing' ? 'This may take a few minutes...' : 'Almost done!'}
             </p>
+          </div>
+        ) : currentStep === 'error' ? (
+          <div className="card">
+            <h2>Video Generation Failed</h2>
+            <p style={{ color: 'var(--error)', marginTop: '12px' }}>
+              {video?.errorMessage || videoError || 'Something went wrong while creating your video.'}
+            </p>
+            <button 
+              className="btn btn-primary" 
+              style={{ marginTop: '20px', width: '100%' }}
+              onClick={() => {
+                setCurrentStep('photos');
+                setVideoError(null);
+              }}
+            >
+              Try Again
+            </button>
           </div>
         ) : currentStep === 'complete' ? (
           <div className="card">

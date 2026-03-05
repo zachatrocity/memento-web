@@ -53,6 +53,7 @@ router.post('/create', requireAuth, async (req, res) => {
     videoGenerator.createVideo({
       sessionId,
       musicFiles,
+      videoId,
       plex,
       onProgress: (progress) => {
         console.log(`Video ${videoId} progress: ${progress}%`);
@@ -108,6 +109,7 @@ router.get('/status/:videoId', requireAuth, async (req, res) => {
       fileSize: video.file_size,
       duration: video.duration_seconds,
       createdAt: video.created_at,
+      errorMessage: video.status === 'error' ? (video as any).error_message : undefined,
       downloadUrl: video.status === 'complete' && video.output_path ? `/output/${path.basename(video.output_path)}` : null
     });
   } catch (error) {
