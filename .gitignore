@@ -1,0 +1,18 @@
+# dependencies
+node_modules
+
+# env
+.env
+
+# build output
+dist
+frontend/build
+
+# runtime data
+data
+
+# logs
+*.log
+
+# OS
+.DS_Store
