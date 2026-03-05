@@ -1,6 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import path from 'path';
 import fs from 'fs';
+import { Readable } from 'stream';
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../utils/database';
 
@@ -347,8 +348,9 @@ export class VideoGenerator {
     const outputPath = path.join(tempDir, `plex_${ratingKey}.mp3`);
     await new Promise<void>((resolve, reject) => {
       const fileStream = fs.createWriteStream(outputPath);
-      streamRes.body.pipe(fileStream);
-      streamRes.body.on('error', reject);
+      const nodeStream = Readable.fromWeb(streamRes.body as any);
+      nodeStream.pipe(fileStream);
+      nodeStream.on('error', reject);
       fileStream.on('finish', () => resolve());
       fileStream.on('error', reject);
     });
