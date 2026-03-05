@@ -42,9 +42,18 @@ router.post('/create', requireAuth, async (req, res) => {
     const videoId = uuidv4();
     
     // Start video generation (don't await, run in background)
+    const plex = req.session.plex && req.session.plex.serverUri && req.session.plex.serverToken
+      ? {
+          serverUri: req.session.plex.serverUri,
+          token: req.session.plex.serverToken,
+          clientId: req.session.plex.clientId
+        }
+      : undefined;
+
     videoGenerator.createVideo({
       sessionId,
       musicFiles,
+      plex,
       onProgress: (progress) => {
         console.log(`Video ${videoId} progress: ${progress}%`);
       },

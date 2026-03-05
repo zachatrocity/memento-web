@@ -12,7 +12,13 @@ function App() {
   const [selectedMusic, setSelectedMusic] = useState<string[]>([]);
   const [video, setVideo] = useState<any>(null);
   const [pickerSession, setPickerSession] = useState<any>(null);
+  const [plexStatus, setPlexStatus] = useState<any>(null);
+  const [plexPinId, setPlexPinId] = useState<string | null>(null);
+  const [plexServers, setPlexServers] = useState<any[]>([]);
+  const [plexLibraries, setPlexLibraries] = useState<any[]>([]);
+  const [plexTracks, setPlexTracks] = useState<any[]>([]);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const plexPollingRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     checkAuth();
@@ -25,6 +31,9 @@ function App() {
     return () => {
       if (pollingRef.current) {
         clearInterval(pollingRef.current);
+      }
+      if (plexPollingRef.current) {
+        clearInterval(plexPollingRef.current);
       }
     };
   }, []);
@@ -56,6 +65,10 @@ function App() {
     setCurrentStep('auth');
     setPickerSession(null);
     setSession(null);
+    setPlexStatus(null);
+    setPlexServers([]);
+    setPlexLibraries([]);
+    setPlexTracks([]);
   };
 
   // Start the Google Photos Picker flow
@@ -177,8 +190,116 @@ function App() {
       const uploadData = await uploadRes.json();
       setMusicFiles(libData.files || []);
       setUploadedMusic(uploadData.files || []);
+      await loadPlexStatus();
     } catch (err) {
       console.error('Failed to load music:', err);
+    }
+  };
+
+  const loadPlexStatus = async () => {
+    try {
+      const res = await fetch('/api/music/plex/status', { credentials: 'include' });
+      const data = await res.json();
+      setPlexStatus(data);
+      if (data.authenticated) {
+        await loadPlexServers();
+        if (data.libraryId) {
+          await loadPlexTracks(data.libraryId);
+        } else if (data.serverId) {
+          await loadPlexLibraries();
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load Plex status:', err);
+    }
+  };
+
+  const startPlexAuth = async () => {
+    try {
+      const res = await fetch('/api/music/plex/pin', {
+        method: 'POST',
+        credentials: 'include'
+      });
+      const data = await res.json();
+      setPlexPinId(String(data.pinId));
+      window.open(data.authUrl, 'plexAuth', 'width=900,height=700');
+      plexPollingRef.current = setInterval(async () => {
+        try {
+          const pollRes = await fetch(`/api/music/plex/pin/${data.pinId}`, {
+            credentials: 'include'
+          });
+          const pollData = await pollRes.json();
+          if (pollData.authenticated) {
+            if (plexPollingRef.current) clearInterval(plexPollingRef.current);
+            setPlexPinId(null);
+            await loadPlexStatus();
+          }
+        } catch (err) {
+          console.error('Plex polling failed:', err);
+        }
+      }, 2000);
+    } catch (err) {
+      console.error('Failed to start Plex auth:', err);
+    }
+  };
+
+  const loadPlexServers = async () => {
+    try {
+      const res = await fetch('/api/music/plex/servers', { credentials: 'include' });
+      const data = await res.json();
+      setPlexServers(data.servers || []);
+    } catch (err) {
+      console.error('Failed to load Plex servers:', err);
+    }
+  };
+
+  const selectPlexServer = async (server: any) => {
+    await fetch('/api/music/plex/servers/select', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        serverId: server.id,
+        serverName: server.name,
+        serverUri: server.uri,
+        serverToken: server.token
+      })
+    });
+    await loadPlexStatus();
+    await loadPlexLibraries();
+  };
+
+  const loadPlexLibraries = async () => {
+    try {
+      const res = await fetch('/api/music/plex/libraries', { credentials: 'include' });
+      const data = await res.json();
+      setPlexLibraries(data.libraries || []);
+    } catch (err) {
+      console.error('Failed to load Plex libraries:', err);
+    }
+  };
+
+  const selectPlexLibrary = async (library: any) => {
+    await fetch('/api/music/plex/libraries/select', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        libraryId: library.id,
+        libraryTitle: library.title
+      })
+    });
+    await loadPlexStatus();
+    await loadPlexTracks(library.id);
+  };
+
+  const loadPlexTracks = async (libraryId: string) => {
+    try {
+      const res = await fetch(`/api/music/plex/library/${libraryId}/tracks`, { credentials: 'include' });
+      const data = await res.json();
+      setPlexTracks(data.tracks || []);
+    } catch (err) {
+      console.error('Failed to load Plex tracks:', err);
     }
   };
 
@@ -333,6 +454,92 @@ function App() {
                   onChange={handleMusicUpload}
                 />
               </div>
+
+              <h3 style={{ marginTop: '20px', fontSize: '1rem' }}>Plex Music</h3>
+              {!plexStatus?.authenticated ? (
+                <div style={{ marginTop: '12px' }}>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={startPlexAuth}
+                    disabled={!!plexPinId}
+                  >
+                    {plexPinId ? 'Waiting for Plex authorization...' : 'Connect Plex'}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>
+                    Connected{plexStatus?.serverName ? ` • ${plexStatus.serverName}` : ''}
+                  </p>
+                  {plexServers.length > 0 && (
+                    <>
+                      <h4 style={{ marginTop: '12px', fontSize: '0.95rem' }}>Choose Server</h4>
+                      <div className="music-list">
+                        {plexServers.map((server: any) => (
+                          <div
+                            key={server.id}
+                            className={`music-item ${plexStatus?.serverId === server.id ? 'selected' : ''}`}
+                            onClick={() => selectPlexServer(server)}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={plexStatus?.serverId === server.id}
+                              onChange={() => {}}
+                            />
+                            <span>{server.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {plexLibraries.length > 0 && (
+                    <>
+                      <h4 style={{ marginTop: '12px', fontSize: '0.95rem' }}>Choose Library</h4>
+                      <div className="music-list">
+                        {plexLibraries.map((library: any) => (
+                          <div
+                            key={library.id}
+                            className={`music-item ${plexStatus?.libraryId === library.id ? 'selected' : ''}`}
+                            onClick={() => selectPlexLibrary(library)}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={plexStatus?.libraryId === library.id}
+                              onChange={() => {}}
+                            />
+                            <span>{library.title}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {plexTracks.length > 0 && (
+                    <>
+                      <h4 style={{ marginTop: '12px', fontSize: '0.95rem' }}>Choose Tracks</h4>
+                      <div className="music-list">
+                        {plexTracks.map((track: any) => {
+                          const key = `plex:${track.ratingKey}`;
+                          const label = track.artist ? `${track.artist} — ${track.title}` : track.title;
+                          return (
+                            <div
+                              key={track.ratingKey}
+                              className={`music-item ${selectedMusic.includes(key) ? 'selected' : ''}`}
+                              onClick={() => toggleMusicSelection(key)}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={selectedMusic.includes(key)}
+                                onChange={() => {}}
+                              />
+                              <span>{label}</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
 
               {musicFiles.length > 0 && (
                 <>

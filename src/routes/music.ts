@@ -4,7 +4,41 @@ import path from 'path';
 import fs from 'fs';
 import { db } from '../utils/database';
 
+interface PlexSession {
+  authToken?: string;
+  clientId?: string;
+  serverId?: string;
+  serverName?: string;
+  serverUri?: string;
+  serverToken?: string;
+  libraryId?: string;
+  libraryTitle?: string;
+}
+
 const router = Router();
+
+const PLEX_PRODUCT = 'Memento Web';
+const PLEX_PLATFORM = 'Web';
+const PLEX_DEVICE = 'Memento';
+const PLEX_VERSION = '1.0';
+
+function getPlexSession(req: any): PlexSession {
+  if (!req.session.plex) req.session.plex = {};
+  return req.session.plex as PlexSession;
+}
+
+function plexHeaders(clientId: string, token?: string) {
+  const headers: Record<string, string> = {
+    'Accept': 'application/json',
+    'X-Plex-Client-Identifier': clientId,
+    'X-Plex-Product': PLEX_PRODUCT,
+    'X-Plex-Platform': PLEX_PLATFORM,
+    'X-Plex-Device': PLEX_DEVICE,
+    'X-Plex-Version': PLEX_VERSION
+  };
+  if (token) headers['X-Plex-Token'] = token;
+  return headers;
+}
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '../../data/uploads');
 const MUSIC_DIR = process.env.MUSIC_DIR || '/music';
@@ -72,6 +106,173 @@ router.get('/library', (req, res) => {
   
   scanDir(MUSIC_DIR);
   res.json({ files: musicFiles });
+});
+
+// Plex: start PIN auth
+router.post('/plex/pin', async (req, res) => {
+  try {
+    const session = getPlexSession(req);
+    const clientId = session.clientId || `memento-${Date.now()}-${Math.round(Math.random() * 1e6)}`;
+    session.clientId = clientId;
+
+    const pinRes = await fetch('https://plex.tv/api/v2/pins?strong=true', {
+      method: 'POST',
+      headers: plexHeaders(clientId)
+    });
+    const pinData = await pinRes.json() as { id: number; code: string };
+
+    const authUrl = `https://app.plex.tv/auth#?clientID=${encodeURIComponent(clientId)}&code=${encodeURIComponent(pinData.code)}&context%5Bdevice%5D%5Bproduct%5D=${encodeURIComponent(PLEX_PRODUCT)}&context%5Bdevice%5D%5Bplatform%5D=${encodeURIComponent(PLEX_PLATFORM)}&context%5Bdevice%5D%5BdeviceName%5D=${encodeURIComponent(PLEX_DEVICE)}`;
+
+    res.json({ authUrl, pinId: pinData.id });
+  } catch (err) {
+    console.error('Plex PIN start failed:', err);
+    res.status(500).json({ error: 'Failed to start Plex auth' });
+  }
+});
+
+// Plex: poll PIN status
+router.get('/plex/pin/:pinId', async (req, res) => {
+  try {
+    const session = getPlexSession(req);
+    if (!session.clientId) return res.status(400).json({ error: 'Missing Plex client' });
+
+    const pinId = req.params.pinId;
+    const pinRes = await fetch(`https://plex.tv/api/v2/pins/${pinId}`, {
+      headers: plexHeaders(session.clientId)
+    });
+    const pinData = await pinRes.json() as { authToken?: string };
+
+    if (pinData.authToken) {
+      session.authToken = pinData.authToken;
+    }
+
+    res.json({ authenticated: !!pinData.authToken });
+  } catch (err) {
+    console.error('Plex PIN poll failed:', err);
+    res.status(500).json({ error: 'Failed to poll Plex PIN' });
+  }
+});
+
+// Plex: status
+router.get('/plex/status', (req, res) => {
+  const session = getPlexSession(req);
+  res.json({
+    authenticated: !!session.authToken,
+    serverId: session.serverId,
+    serverName: session.serverName,
+    libraryId: session.libraryId,
+    libraryTitle: session.libraryTitle
+  });
+});
+
+// Plex: list servers
+router.get('/plex/servers', async (req, res) => {
+  try {
+    const session = getPlexSession(req);
+    if (!session.authToken || !session.clientId) {
+      return res.status(401).json({ error: 'Plex authentication required' });
+    }
+
+    const resourcesRes = await fetch('https://plex.tv/api/v2/resources?includeHttps=1&includeRelay=1', {
+      headers: plexHeaders(session.clientId, session.authToken)
+    });
+    const resources = await resourcesRes.json() as any[];
+
+    const servers = resources
+      .filter(r => r.provides?.includes('server'))
+      .map(r => {
+        const connection = (r.connections || []).find((c: any) => c.uri?.startsWith('https://')) || r.connections?.[0];
+        return {
+          id: r.clientIdentifier,
+          name: r.name,
+          uri: connection?.uri,
+          token: r.accessToken
+        };
+      })
+      .filter(r => r.uri && r.token);
+
+    res.json({ servers });
+  } catch (err) {
+    console.error('Plex servers failed:', err);
+    res.status(500).json({ error: 'Failed to load Plex servers' });
+  }
+});
+
+// Plex: select server
+router.post('/plex/servers/select', (req, res) => {
+  const { serverId, serverName, serverUri, serverToken } = req.body || {};
+  if (!serverId || !serverUri || !serverToken) {
+    return res.status(400).json({ error: 'Server details required' });
+  }
+  const session = getPlexSession(req);
+  session.serverId = serverId;
+  session.serverName = serverName;
+  session.serverUri = serverUri;
+  session.serverToken = serverToken;
+  session.libraryId = undefined;
+  session.libraryTitle = undefined;
+  res.json({ success: true });
+});
+
+// Plex: list libraries
+router.get('/plex/libraries', async (req, res) => {
+  try {
+    const session = getPlexSession(req);
+    if (!session.serverUri || !session.serverToken || !session.clientId) {
+      return res.status(400).json({ error: 'Plex server not selected' });
+    }
+
+    const librariesRes = await fetch(`${session.serverUri}/library/sections`, {
+      headers: plexHeaders(session.clientId, session.serverToken)
+    });
+    const data = await librariesRes.json() as any;
+    const libraries = (data.MediaContainer?.Directory || [])
+      .filter((d: any) => d.type === 'artist' || d.type === 'music')
+      .map((d: any) => ({ id: d.key, title: d.title }));
+
+    res.json({ libraries });
+  } catch (err) {
+    console.error('Plex libraries failed:', err);
+    res.status(500).json({ error: 'Failed to load Plex libraries' });
+  }
+});
+
+// Plex: select library
+router.post('/plex/libraries/select', (req, res) => {
+  const { libraryId, libraryTitle } = req.body || {};
+  if (!libraryId) return res.status(400).json({ error: 'Library required' });
+  const session = getPlexSession(req);
+  session.libraryId = libraryId;
+  session.libraryTitle = libraryTitle;
+  res.json({ success: true });
+});
+
+// Plex: list tracks in selected library
+router.get('/plex/library/:libraryId/tracks', async (req, res) => {
+  try {
+    const session = getPlexSession(req);
+    if (!session.serverUri || !session.serverToken || !session.clientId) {
+      return res.status(400).json({ error: 'Plex server not selected' });
+    }
+
+    const libraryId = req.params.libraryId;
+    const limit = Math.min(parseInt(req.query.limit as string || '200', 10), 500);
+    const tracksRes = await fetch(`${session.serverUri}/library/sections/${libraryId}/all?type=10&X-Plex-Container-Size=${limit}`, {
+      headers: plexHeaders(session.clientId, session.serverToken)
+    });
+    const data = await tracksRes.json() as any;
+    const tracks = (data.MediaContainer?.Metadata || []).map((t: any) => ({
+      ratingKey: t.ratingKey,
+      title: t.title,
+      artist: t.grandparentTitle || t.originalTitle || t.artist || '',
+      duration: t.duration
+    }));
+
+    res.json({ tracks });
+  } catch (err) {
+    console.error('Plex tracks failed:', err);
+    res.status(500).json({ error: 'Failed to load Plex tracks' });
+  }
 });
 
 // Upload music

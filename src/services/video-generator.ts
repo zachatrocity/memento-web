@@ -14,6 +14,11 @@ const TRANSITION_DURATION = parseFloat(process.env.TRANSITION_DURATION_SECONDS |
 interface VideoJob {
   sessionId: string;
   musicFiles: string[];
+  plex?: {
+    serverUri: string;
+    token: string;
+    clientId?: string;
+  };
   onProgress?: (progress: number) => void;
   onComplete?: (outputPath: string) => void;
   onError?: (error: Error) => void;
@@ -62,7 +67,7 @@ export class VideoGenerator {
 
       // Concatenate music files
       console.log('Processing audio...');
-      const audioPath = await this.prepareAudio(job.musicFiles, tempDir, photos.length);
+      const audioPath = await this.prepareAudio(job.musicFiles, tempDir, photos.length, job.plex);
 
       // Build ffmpeg command for slideshow
       console.log('Generating video...');
@@ -119,15 +124,21 @@ export class VideoGenerator {
     return prepared;
   }
 
-  private async prepareAudio(musicFiles: string[], tempDir: string, photoCount: number): Promise<string> {
+  private async prepareAudio(
+    musicFiles: string[],
+    tempDir: string,
+    photoCount: number,
+    plex?: { serverUri: string; token: string; clientId?: string }
+  ): Promise<string> {
     // Calculate required duration
     const requiredDuration = photoCount * (PHOTO_DURATION + TRANSITION_DURATION);
     const outputPath = path.join(tempDir, 'audio.mp3');
     
-    if (musicFiles.length === 1) {
+    const resolvedFiles = await this.resolveMusicFiles(musicFiles, tempDir, plex);
+
+    if (resolvedFiles.length === 1) {
       // Single file - check if we need to loop it
-      const singlePath = path.join(UPLOAD_DIR, musicFiles[0]);
-      const finalMusicPath = fs.existsSync(singlePath) ? singlePath : path.join(MUSIC_DIR, musicFiles[0]);
+      const finalMusicPath = resolvedFiles[0];
       
       // Get duration of music file
       const duration = await this.getAudioDuration(finalMusicPath);
@@ -171,9 +182,7 @@ export class VideoGenerator {
       const concatFile = path.join(tempDir, 'concat.txt');
       let concatContent = '';
       
-      for (const file of musicFiles) {
-        const filePath = path.join(UPLOAD_DIR, file);
-        const finalPath = fs.existsSync(filePath) ? filePath : path.join(MUSIC_DIR, file);
+      for (const finalPath of resolvedFiles) {
         concatContent += `file '${finalPath.replace(/'/g, "'\\''")}'\n`;
       }
       fs.writeFileSync(concatFile, concatContent);
@@ -280,6 +289,71 @@ export class VideoGenerator {
         else resolve(metadata.format.duration || 0);
       });
     });
+  }
+
+  private async resolveMusicFiles(
+    musicFiles: string[],
+    tempDir: string,
+    plex?: { serverUri: string; token: string; clientId?: string }
+  ): Promise<string[]> {
+    const resolved: string[] = [];
+
+    for (const file of musicFiles) {
+      if (file.startsWith('plex:')) {
+        if (!plex?.serverUri || !plex.token) {
+          throw new Error('Plex track selected but Plex is not connected');
+        }
+        const ratingKey = file.replace('plex:', '');
+        const downloaded = await this.downloadPlexTrack(ratingKey, tempDir, plex);
+        resolved.push(downloaded);
+        continue;
+      }
+
+      const uploadPath = path.join(UPLOAD_DIR, file);
+      const finalPath = fs.existsSync(uploadPath) ? uploadPath : path.join(MUSIC_DIR, file);
+      resolved.push(finalPath);
+    }
+
+    return resolved;
+  }
+
+  private async downloadPlexTrack(
+    ratingKey: string,
+    tempDir: string,
+    plex: { serverUri: string; token: string; clientId?: string }
+  ): Promise<string> {
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'X-Plex-Token': plex.token
+    };
+    if (plex.clientId) headers['X-Plex-Client-Identifier'] = plex.clientId;
+
+    const metaRes = await fetch(`${plex.serverUri}/library/metadata/${ratingKey}`, { headers });
+    const meta = await metaRes.json() as any;
+    const media = meta.MediaContainer?.Metadata?.[0]?.Media?.[0];
+    const partKey = media?.Part?.[0]?.key;
+    if (!partKey) throw new Error('Unable to resolve Plex media path');
+
+    const streamRes = await fetch(`${plex.serverUri}${partKey}`, {
+      headers: {
+        'X-Plex-Token': plex.token
+      }
+    });
+
+    if (!streamRes.ok || !streamRes.body) {
+      throw new Error('Failed to download Plex track');
+    }
+
+    const outputPath = path.join(tempDir, `plex_${ratingKey}.mp3`);
+    await new Promise<void>((resolve, reject) => {
+      const fileStream = fs.createWriteStream(outputPath);
+      streamRes.body.pipe(fileStream);
+      streamRes.body.on('error', reject);
+      fileStream.on('finish', () => resolve());
+      fileStream.on('error', reject);
+    });
+
+    return outputPath;
   }
 
   private cleanup(dirPath: string) {
