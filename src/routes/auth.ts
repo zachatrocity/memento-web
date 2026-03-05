@@ -23,10 +23,11 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/callback'
 );
 
-// Scopes needed for Google Photos
+// Scopes needed for Google Photos Picker API
+// Note: photoslibrary.readonly was deprecated March 31, 2025
+// Now using the Photos Picker API instead
 const SCOPES = [
-  // Use readonly Photos scope (non-restricted) for unverified apps
-  'https://www.googleapis.com/auth/photoslibrary.readonly',
+  'https://www.googleapis.com/auth/photospicker.mediaitems.readonly',
   'https://www.googleapis.com/auth/userinfo.profile',
   'https://www.googleapis.com/auth/userinfo.email'
 ];

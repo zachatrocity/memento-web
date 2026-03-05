@@ -1,16 +1,18 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [user, setUser] = useState<{ email?: string } | null>(null);
   const [currentStep, setCurrentStep] = useState('auth');
   const [session, setSession] = useState<any>(null);
-  const [albums, setAlbums] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadingMessage, setLoadingMessage] = useState('Working...');
   const [musicFiles, setMusicFiles] = useState<any[]>([]);
   const [uploadedMusic, setUploadedMusic] = useState<any[]>([]);
   const [selectedMusic, setSelectedMusic] = useState<string[]>([]);
   const [video, setVideo] = useState<any>(null);
+  const [pickerSession, setPickerSession] = useState<any>(null);
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     checkAuth();
@@ -18,6 +20,13 @@ function App() {
       window.history.replaceState({}, '', '/');
       checkAuth();
     }
+    
+    // Cleanup polling on unmount
+    return () => {
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
+    };
   }, []);
 
   const checkAuth = async () => {
@@ -27,7 +36,7 @@ function App() {
       if (data.authenticated) {
         setAuthenticated(true);
         setUser(data.user);
-        loadAlbums();
+        setCurrentStep('picker');
       }
     } catch (err) {
       console.error('Auth check failed:', err);
@@ -45,29 +54,89 @@ function App() {
     setAuthenticated(false);
     setUser(null);
     setCurrentStep('auth');
+    setPickerSession(null);
+    setSession(null);
   };
 
-  const loadAlbums = async () => {
+  // Start the Google Photos Picker flow
+  const startPhotoPicker = async () => {
     setLoading(true);
+    setLoadingMessage('Creating photo picker session...');
     try {
-      const res = await fetch('/api/photos/albums', { credentials: 'include' });
+      const res = await fetch('/api/photos/picker/session', { 
+        method: 'POST',
+        credentials: 'include' 
+      });
       const data = await res.json();
-      setAlbums(data.albums || []);
-      setCurrentStep('albums');
+      
+      if (data.error) {
+        console.error('Failed to create picker session:', data);
+        alert(`Error: ${data.details?.message || data.error}`);
+        setLoading(false);
+        return;
+      }
+      
+      setPickerSession(data);
+      
+      // Open the picker URL in a new window
+      const pickerWindow = window.open(data.pickerUrl, 'photoPicker', 'width=800,height=600');
+      
+      // Start polling for completion
+      setLoadingMessage('Waiting for you to select photos...');
+      pollingRef.current = setInterval(async () => {
+        try {
+          const pollRes = await fetch(`/api/photos/picker/session/${data.sessionId}`, {
+            credentials: 'include'
+          });
+          const pollData = await pollRes.json();
+          
+          if (pollData.mediaItemsSet) {
+            // User has selected photos
+            if (pollingRef.current) {
+              clearInterval(pollingRef.current);
+              pollingRef.current = null;
+            }
+            
+            // Close the picker window if still open
+            if (pickerWindow && !pickerWindow.closed) {
+              pickerWindow.close();
+            }
+            
+            // Import the selected photos
+            await importPhotos(data.sessionId);
+          }
+        } catch (err) {
+          console.error('Polling error:', err);
+        }
+      }, 2000); // Poll every 2 seconds
+      
     } catch (err) {
-      console.error('Failed to load albums:', err);
-    } finally {
+      console.error('Failed to start photo picker:', err);
       setLoading(false);
     }
   };
 
-  const selectAlbum = async (albumId: string) => {
-    setLoading(true);
+  // Import photos from the picker session
+  const importPhotos = async (pickerSessionId: string) => {
+    setLoadingMessage('Importing selected photos...');
     try {
-      const res = await fetch(`/api/photos/album/${albumId}`, { credentials: 'include' });
+      const res = await fetch('/api/photos/picker/import', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pickerSessionId })
+      });
       const data = await res.json();
       
+      if (data.error) {
+        console.error('Failed to import photos:', data);
+        alert(`Error: ${data.details?.message || data.error}`);
+        setLoading(false);
+        return;
+      }
+      
       // Process photos (deduplicate)
+      setLoadingMessage('Processing photos...');
       const processRes = await fetch('/api/photos/process', {
         method: 'POST',
         credentials: 'include',
@@ -79,10 +148,22 @@ function App() {
       setSession({ ...data, ...processData });
       setCurrentStep('photos');
       loadMusic();
+      
+      // Clean up the picker session
+      try {
+        await fetch(`/api/photos/picker/session/${pickerSessionId}`, {
+          method: 'DELETE',
+          credentials: 'include'
+        });
+      } catch (err) {
+        // Ignore cleanup errors
+      }
+      
     } catch (err) {
-      console.error('Failed to select album:', err);
+      console.error('Failed to import photos:', err);
     } finally {
       setLoading(false);
+      setPickerSession(null);
     }
   };
 
@@ -111,6 +192,7 @@ function App() {
     }
     
     setLoading(true);
+    setLoadingMessage('Uploading music...');
     try {
       await fetch('/api/music/upload', {
         method: 'POST',
@@ -135,6 +217,7 @@ function App() {
 
   const createVideo = async () => {
     setLoading(true);
+    setLoadingMessage('Creating video...');
     try {
       const res = await fetch('/api/video/create', {
         method: 'POST',
@@ -193,7 +276,7 @@ function App() {
         {!authenticated ? (
           <div className="card empty-state">
             <h1>Welcome to Memento</h1>
-            <p>Create beautiful slideshow videos from your Google Photos albums</p>
+            <p>Create beautiful slideshow videos from your Google Photos</p>
             <button onClick={login} className="btn btn-primary" style={{ marginTop: '20px' }}>
               Connect Google Photos
             </button>
@@ -201,31 +284,26 @@ function App() {
         ) : loading ? (
           <div className="card loading">
             <div className="loading-spinner"></div>
-            <p>Working...</p>
+            <p>{loadingMessage}</p>
+            {pickerSession && (
+              <p style={{ marginTop: '12px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                A new window should have opened for you to select photos.<br/>
+                If not, <a href={pickerSession.pickerUrl} target="_blank" rel="noopener noreferrer">click here</a>.
+              </p>
+            )}
           </div>
-        ) : currentStep === 'albums' ? (
-          <div className="card">
-            <h2>Select an Album</h2>
-            <div className="album-grid">
-              {albums.map(album => (
-                <div key={album.id} className="album-card" onClick={() => selectAlbum(album.id)}>
-                  <div className="album-thumb">
-                    {album.coverPhotoBaseUrl ? (
-                      <img src={`${album.coverPhotoBaseUrl}=w200-h200`} alt="" />
-                    ) : (
-                      <span style={{ fontSize: '2rem' }}>📁</span>
-                    )}
-                  </div>
-                  <h3>{album.title || 'Untitled'}</h3>
-                  <span>{album.mediaItemsCount} photos</span>
-                </div>
-              ))}
-            </div>
+        ) : currentStep === 'picker' ? (
+          <div className="card empty-state">
+            <h2>Select Photos</h2>
+            <p>Click the button below to open Google Photos and select the photos you want to include in your slideshow.</p>
+            <button onClick={startPhotoPicker} className="btn btn-primary" style={{ marginTop: '20px' }}>
+              Select Photos from Google Photos
+            </button>
           </div>
         ) : currentStep === 'photos' ? (
           <>
             <div className="card">
-              <h2>{session?.albumTitle}</h2>
+              <h2>Selected Photos</h2>
               <p style={{ color: 'var(--text-muted)' }}>
                 Original: {session?.photoCount} photos • 
                 Selected: {session?.selectedCount} photos •
@@ -234,6 +312,13 @@ function App() {
               <p style={{ marginTop: '12px', fontWeight: 500 }}>
                 You need approximately <strong>{session?.requiredMusicMinutes} minutes</strong> of music
               </p>
+              <button 
+                onClick={() => setCurrentStep('picker')} 
+                className="btn btn-secondary"
+                style={{ marginTop: '12px' }}
+              >
+                Select Different Photos
+              </button>
             </div>
 
             <div className="card">
@@ -333,7 +418,7 @@ function App() {
               className="btn btn-secondary" 
               style={{ marginTop: '12px', width: '100%' }}
               onClick={() => {
-                setCurrentStep('albums');
+                setCurrentStep('picker');
                 setSession(null);
                 setVideo(null);
               }}
