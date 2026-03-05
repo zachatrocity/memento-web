@@ -7,6 +7,7 @@ import { authRouter } from './routes/auth';
 import { photosRouter } from './routes/photos';
 import { musicRouter } from './routes/music';
 import { videoRouter } from './routes/video';
+import { settingsRouter } from './routes/settings';
 import { db } from './utils/database';
 
 dotenv.config();
@@ -36,7 +37,7 @@ app.use(session({
   cookie: {
     secure: 'auto',
     sameSite: 'lax',
-    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
   }
 }));
 
@@ -54,6 +55,7 @@ app.use('/auth', authRouter);
 app.use('/api/photos', photosRouter);
 app.use('/api/music', musicRouter);
 app.use('/api/video', videoRouter);
+app.use('/api/settings', settingsRouter);
 
 // Serve frontend in production
 if (process.env.NODE_ENV === 'production') {

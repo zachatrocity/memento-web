@@ -69,8 +69,23 @@ export const db = {
         output_path TEXT,
         duration_seconds INTEGER,
         file_size INTEGER,
+        error_message TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (session_id) REFERENCES sessions(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_settings (
+        user_id TEXT PRIMARY KEY,
+        plex_auth_token TEXT,
+        plex_client_id TEXT,
+        plex_server_id TEXT,
+        plex_server_name TEXT,
+        plex_server_uri TEXT,
+        plex_server_token TEXT,
+        plex_library_id TEXT,
+        plex_library_title TEXT,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id)
       );
     `);
 

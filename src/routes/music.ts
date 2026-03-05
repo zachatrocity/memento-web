@@ -144,6 +144,19 @@ router.get('/plex/pin/:pinId', async (req, res) => {
 
     if (pinData.authToken) {
       session.authToken = pinData.authToken;
+      
+      // Save to persistent settings if user is authenticated
+      if (req.session.userId) {
+        const database = db.get();
+        const existing = database.prepare('SELECT user_id FROM user_settings WHERE user_id = ?').get(req.session.userId);
+        if (existing) {
+          database.prepare('UPDATE user_settings SET plex_auth_token = ?, plex_client_id = ? WHERE user_id = ?')
+            .run(pinData.authToken, session.clientId, req.session.userId);
+        } else {
+          database.prepare('INSERT INTO user_settings (user_id, plex_auth_token, plex_client_id) VALUES (?, ?, ?)')
+            .run(req.session.userId, pinData.authToken, session.clientId);
+        }
+      }
     }
 
     res.json({ authenticated: !!pinData.authToken });
@@ -199,7 +212,7 @@ router.get('/plex/servers', async (req, res) => {
 });
 
 // Plex: select server
-router.post('/plex/servers/select', (req, res) => {
+router.post('/plex/servers/select', async (req, res) => {
   const { serverId, serverName, serverUri, serverToken } = req.body || {};
   if (!serverId || !serverUri || !serverToken) {
     return res.status(400).json({ error: 'Server details required' });
@@ -211,6 +224,31 @@ router.post('/plex/servers/select', (req, res) => {
   session.serverToken = serverToken;
   session.libraryId = undefined;
   session.libraryTitle = undefined;
+  
+  // Persist to database
+  if (req.session.userId) {
+    try {
+      const database = db.get();
+      const existing = database.prepare('SELECT user_id FROM user_settings WHERE user_id = ?').get(req.session.userId);
+      if (existing) {
+        database.prepare(`
+          UPDATE user_settings SET 
+            plex_server_id = ?, plex_server_name = ?, plex_server_uri = ?, plex_server_token = ?,
+            plex_library_id = NULL, plex_library_title = NULL
+          WHERE user_id = ?
+        `).run(serverId, serverName, serverUri, serverToken, req.session.userId);
+      } else {
+        database.prepare(`
+          INSERT INTO user_settings 
+            (user_id, plex_server_id, plex_server_name, plex_server_uri, plex_server_token, plex_auth_token, plex_client_id)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(req.session.userId, serverId, serverName, serverUri, serverToken, session.authToken, session.clientId);
+      }
+    } catch (err) {
+      console.error('Failed to persist server selection:', err);
+    }
+  }
+  
   res.json({ success: true });
 });
 
@@ -238,12 +276,27 @@ router.get('/plex/libraries', async (req, res) => {
 });
 
 // Plex: select library
-router.post('/plex/libraries/select', (req, res) => {
+router.post('/plex/libraries/select', async (req, res) => {
   const { libraryId, libraryTitle } = req.body || {};
   if (!libraryId) return res.status(400).json({ error: 'Library required' });
   const session = getPlexSession(req);
   session.libraryId = libraryId;
   session.libraryTitle = libraryTitle;
+  
+  // Persist to database
+  if (req.session.userId) {
+    try {
+      const database = db.get();
+      database.prepare(`
+        UPDATE user_settings SET 
+          plex_library_id = ?, plex_library_title = ?
+        WHERE user_id = ?
+      `).run(libraryId, libraryTitle, req.session.userId);
+    } catch (err) {
+      console.error('Failed to persist library selection:', err);
+    }
+  }
+  
   res.json({ success: true });
 });
 
@@ -256,17 +309,35 @@ router.get('/plex/library/:libraryId/tracks', async (req, res) => {
     }
 
     const libraryId = req.params.libraryId;
-    const limit = Math.min(parseInt(req.query.limit as string || '200', 10), 500);
-    const tracksRes = await fetch(`${session.serverUri}/library/sections/${libraryId}/all?type=10&X-Plex-Container-Size=${limit}`, {
+    const limit = Math.min(parseInt(req.query.limit as string || '500', 10), 1000);
+    const searchQuery = req.query.search as string;
+    
+    let url = `${session.serverUri}/library/sections/${libraryId}/all?type=10&X-Plex-Container-Size=${limit}`;
+    
+    // Add search filter if provided
+    if (searchQuery) {
+      url += `&title=${encodeURIComponent(searchQuery)}`;
+    }
+    
+    const tracksRes = await fetch(url, {
       headers: plexHeaders(session.clientId, session.serverToken)
     });
     const data = await tracksRes.json() as any;
-    const tracks = (data.MediaContainer?.Metadata || []).map((t: any) => ({
+    let tracks = (data.MediaContainer?.Metadata || []).map((t: any) => ({
       ratingKey: t.ratingKey,
       title: t.title,
       artist: t.grandparentTitle || t.originalTitle || t.artist || '',
       duration: t.duration
     }));
+
+    // Client-side filtering for broader search (search in both title and artist)
+    if (searchQuery && !searchQuery.includes('"')) {
+      const searchLower = searchQuery.toLowerCase();
+      tracks = tracks.filter((t: any) => 
+        t.title.toLowerCase().includes(searchLower) || 
+        t.artist.toLowerCase().includes(searchLower)
+      );
+    }
 
     res.json({ tracks });
   } catch (err) {

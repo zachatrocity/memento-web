@@ -18,6 +18,8 @@ function App() {
   const [plexServers, setPlexServers] = useState<any[]>([]);
   const [plexLibraries, setPlexLibraries] = useState<any[]>([]);
   const [plexTracks, setPlexTracks] = useState<any[]>([]);
+  const [plexSearchQuery, setPlexSearchQuery] = useState('');
+  const [isSearchingPlex, setIsSearchingPlex] = useState(false);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const plexPollingRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -294,13 +296,26 @@ function App() {
     await loadPlexTracks(library.id);
   };
 
-  const loadPlexTracks = async (libraryId: string) => {
+  const loadPlexTracks = async (libraryId: string, searchQuery?: string) => {
     try {
-      const res = await fetch(`/api/music/plex/library/${libraryId}/tracks`, { credentials: 'include' });
+      setIsSearchingPlex(true);
+      let url = `/api/music/plex/library/${libraryId}/tracks`;
+      if (searchQuery) {
+        url += `?search=${encodeURIComponent(searchQuery)}`;
+      }
+      const res = await fetch(url, { credentials: 'include' });
       const data = await res.json();
       setPlexTracks(data.tracks || []);
     } catch (err) {
       console.error('Failed to load Plex tracks:', err);
+    } finally {
+      setIsSearchingPlex(false);
+    }
+  };
+
+  const searchPlexTracks = async (query: string) => {
+    if (plexStatus?.libraryId) {
+      await loadPlexTracks(plexStatus.libraryId, query);
     }
   };
 
@@ -518,10 +533,36 @@ function App() {
                       </div>
                     </>
                   )}
-                  {plexTracks.length > 0 && (
+                  {plexStatus?.libraryId && (
                     <>
                       <h4 style={{ marginTop: '12px', fontSize: '0.95rem' }}>Choose Tracks</h4>
-                      <div className="music-list">
+                      <div style={{ marginTop: '8px', marginBottom: '12px' }}>
+                        <input
+                          type="text"
+                          placeholder="Search tracks or artists..."
+                          value={plexSearchQuery}
+                          onChange={(e) => {
+                            setPlexSearchQuery(e.target.value);
+                            searchPlexTracks(e.target.value);
+                          }}
+                          style={{
+                            width: '100%',
+                            padding: '8px 12px',
+                            border: '1px solid var(--border)',
+                            borderRadius: '6px',
+                            fontSize: '0.9rem'
+                          }}
+                        />
+                      </div>
+                      {isSearchingPlex && (
+                        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Searching...</p>
+                      )}
+                      <div className="music-list" style={{ maxHeight: '300px', overflowY: 'auto' }}>
+                        {plexTracks.length === 0 && !isSearchingPlex && (
+                          <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', padding: '12px' }}>
+                            {plexSearchQuery ? 'No tracks found' : 'Type to search for tracks'}
+                          </p>
+                        )}
                         {plexTracks.map((track: any) => {
                           const key = `plex:${track.ratingKey}`;
                           const label = track.artist ? `${track.artist} — ${track.title}` : track.title;

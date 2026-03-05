@@ -109,10 +109,31 @@ router.get('/callback', async (req, res) => {
 });
 
 // Check auth status
-router.get('/status', (req, res) => {
+router.get('/status', async (req, res) => {
   if (req.session.userId) {
     const database = db.get();
     const user = database.prepare('SELECT id, email, name FROM users WHERE id = ?').get(req.session.userId) as { id: string; email: string; name: string } | undefined;
+    
+    // Load saved Plex settings into session if not already loaded
+    if (!req.session.plex || !req.session.plex.authToken) {
+      const settings = database.prepare(
+        'SELECT * FROM user_settings WHERE user_id = ?'
+      ).get(req.session.userId) as any;
+      
+      if (settings && settings.plex_auth_token) {
+        req.session.plex = {
+          authToken: settings.plex_auth_token,
+          clientId: settings.plex_client_id,
+          serverId: settings.plex_server_id,
+          serverName: settings.plex_server_name,
+          serverUri: settings.plex_server_uri,
+          serverToken: settings.plex_server_token,
+          libraryId: settings.plex_library_id,
+          libraryTitle: settings.plex_library_title
+        };
+      }
+    }
+    
     res.json({ authenticated: true, user });
   } else {
     res.json({ authenticated: false });
