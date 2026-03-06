@@ -317,27 +317,42 @@ router.get('/plex/library/:libraryId/tracks', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit as string || '500', 10), 1000);
     const searchQuery = req.query.search as string;
     
-    let url = `${session.serverUri}/library/sections/${libraryId}/all?type=10&X-Plex-Container-Size=${limit}`;
+    let tracks: any[] = [];
     
-    // Add search filter if provided
-    if (searchQuery) {
-      url += `&title=${encodeURIComponent(searchQuery)}`;
+    if (searchQuery && searchQuery.trim()) {
+      // Use Plex's universal search for better results across title and artist
+      // This searches the entire library for matching tracks
+      const searchUrl = `${session.serverUri}/library/sections/${libraryId}/search?type=10&query=${encodeURIComponent(searchQuery)}&X-Plex-Container-Size=${limit}`;
+      
+      const searchRes = await fetch(searchUrl, {
+        headers: plexHeaders(session.clientId, session.serverToken)
+      });
+      const searchData = await searchRes.json() as any;
+      tracks = (searchData.MediaContainer?.Metadata || []).map((t: any) => ({
+        ratingKey: t.ratingKey,
+        title: t.title,
+        artist: t.grandparentTitle || t.originalTitle || t.artist || '',
+        duration: t.duration
+      }));
+    } else {
+      // No search query - list all tracks
+      let url = `${session.serverUri}/library/sections/${libraryId}/all?type=10&X-Plex-Container-Size=${limit}`;
+      
+      const tracksRes = await fetch(url, {
+        headers: plexHeaders(session.clientId, session.serverToken)
+      });
+      const data = await tracksRes.json() as any;
+      tracks = (data.MediaContainer?.Metadata || []).map((t: any) => ({
+        ratingKey: t.ratingKey,
+        title: t.title,
+        artist: t.grandparentTitle || t.originalTitle || t.artist || '',
+        duration: t.duration
+      }));
     }
-    
-    const tracksRes = await fetch(url, {
-      headers: plexHeaders(session.clientId, session.serverToken)
-    });
-    const data = await tracksRes.json() as any;
-    let tracks = (data.MediaContainer?.Metadata || []).map((t: any) => ({
-      ratingKey: t.ratingKey,
-      title: t.title,
-      artist: t.grandparentTitle || t.originalTitle || t.artist || '',
-      duration: t.duration
-    }));
 
-    // Client-side filtering for broader search (search in both title and artist)
-    if (searchQuery && !searchQuery.includes('"')) {
-      const searchLower = searchQuery.toLowerCase();
+    // Client-side filtering for additional safety (search in both title and artist)
+    if (searchQuery && searchQuery.trim()) {
+      const searchLower = searchQuery.toLowerCase().trim();
       tracks = tracks.filter((t: any) => 
         t.title.toLowerCase().includes(searchLower) || 
         t.artist.toLowerCase().includes(searchLower)
@@ -402,19 +417,75 @@ router.delete('/uploaded/:filename', (req, res) => {
   }
 });
 
-// Get audio duration (simplified - in real app use music-metadata)
+// Get audio duration for multiple files (Plex tracks and uploaded files)
 router.post('/durations', async (req, res) => {
-  const { files } = req.body; // Array of file paths
+  const { files, plex } = req.body; // files: Array of file paths/plex keys, plex: optional plex config
+  const session = getPlexSession(req);
   
-  // For now, estimate based on file size (rough approximation)
-  // In production, use music-metadata npm package for accurate duration
-  const results = files.map((file: string) => ({
-    path: file,
-    // Rough estimate: 1MB ≈ 1 minute for MP3
-    estimatedDuration: 60 
-  }));
+  if (!files || !Array.isArray(files)) {
+    return res.status(400).json({ error: 'Files array required' });
+  }
   
-  res.json({ durations: results });
+  const results: Array<{ path: string; duration: number; found: boolean }> = [];
+  let totalDuration = 0;
+  
+  for (const file of files) {
+    try {
+      if (file.startsWith('plex:')) {
+        // Get duration from Plex metadata
+        if (!session.serverUri || !session.serverToken) {
+          results.push({ path: file, duration: 0, found: false });
+          continue;
+        }
+        const ratingKey = file.replace('plex:', '');
+        const metaRes = await fetch(`${session.serverUri}/library/metadata/${ratingKey}`, {
+          headers: plexHeaders(session.clientId || '', session.serverToken)
+        });
+        const meta = await metaRes.json() as any;
+        const track = meta.MediaContainer?.Metadata?.[0];
+        // Plex duration is in milliseconds
+        const duration = track?.duration ? Math.round(track.duration / 1000) : 0;
+        results.push({ path: file, duration, found: duration > 0 });
+        totalDuration += duration;
+      } else {
+        // Get duration from local file using ffprobe
+        const filePath = path.join(UPLOAD_DIR, file);
+        const finalPath = fs.existsSync(filePath) ? filePath : path.join(MUSIC_DIR, file);
+        
+        if (!fs.existsSync(finalPath)) {
+          results.push({ path: file, duration: 0, found: false });
+          continue;
+        }
+        
+        const duration = await getLocalAudioDuration(finalPath);
+        results.push({ path: file, duration, found: duration > 0 });
+        totalDuration += duration;
+      }
+    } catch (err) {
+      console.error(`Failed to get duration for ${file}:`, err);
+      results.push({ path: file, duration: 0, found: false });
+    }
+  }
+  
+  res.json({ 
+    durations: results, 
+    totalDuration,
+    totalDurationMinutes: Math.round(totalDuration / 60 * 10) / 10 // Round to 1 decimal
+  });
 });
+
+// Helper function to get audio duration using ffprobe
+function getLocalAudioDuration(filePath: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = require('fluent-ffmpeg');
+    ffmpeg.ffprobe(filePath, (err: any, metadata: any) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(metadata.format.duration || 0);
+      }
+    });
+  });
+}
 
 export { router as musicRouter };

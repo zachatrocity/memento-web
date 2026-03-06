@@ -20,6 +20,8 @@ function App() {
   const [plexTracks, setPlexTracks] = useState<any[]>([]);
   const [plexSearchQuery, setPlexSearchQuery] = useState('');
   const [isSearchingPlex, setIsSearchingPlex] = useState(false);
+  const [selectedMusicDuration, setSelectedMusicDuration] = useState<number>(0);
+  const [isLoadingDuration, setIsLoadingDuration] = useState(false);
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
   const plexPollingRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -345,11 +347,43 @@ function App() {
   };
 
   const toggleMusicSelection = (path: string) => {
-    setSelectedMusic(prev => 
-      prev.includes(path) 
-        ? prev.filter(p => p !== path)
-        : [...prev, path]
-    );
+    const newSelection = selectedMusic.includes(path) 
+      ? selectedMusic.filter(p => p !== path)
+      : [...selectedMusic, path];
+    setSelectedMusic(newSelection);
+    // Update duration after selection change
+    updateMusicDuration(newSelection);
+  };
+
+  // Fetch total duration of selected music files
+  const updateMusicDuration = async (files: string[]) => {
+    if (files.length === 0) {
+      setSelectedMusicDuration(0);
+      return;
+    }
+    
+    setIsLoadingDuration(true);
+    try {
+      const res = await fetch('/api/music/durations', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files })
+      });
+      const data = await res.json();
+      setSelectedMusicDuration(data.totalDuration || 0);
+    } catch (err) {
+      console.error('Failed to get music duration:', err);
+    } finally {
+      setIsLoadingDuration(false);
+    }
+  };
+
+  // Format seconds to MM:SS
+  const formatDuration = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   const createVideo = async () => {
@@ -467,6 +501,52 @@ function App() {
             <div className="card">
               <h2>Add Music</h2>
               
+              {/* Music Duration Tracker */}
+              <div style={{ 
+                marginTop: '16px', 
+                padding: '12px', 
+                backgroundColor: 'var(--bg-secondary)', 
+                borderRadius: '8px',
+                border: selectedMusicDuration >= (session?.requiredMusicSeconds || 0) 
+                  ? '1px solid var(--success)' 
+                  : '1px solid var(--border)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ fontWeight: 500 }}>
+                    {isLoadingDuration ? 'Calculating...' : `${formatDuration(selectedMusicDuration)} selected`}
+                  </span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                    Need: {formatDuration(session?.requiredMusicSeconds || 0)}
+                  </span>
+                </div>
+                {/* Progress bar */}
+                <div style={{ 
+                  marginTop: '8px', 
+                  height: '6px', 
+                  backgroundColor: 'var(--border)', 
+                  borderRadius: '3px',
+                  overflow: 'hidden'
+                }}>
+                  <div style={{
+                    width: `${Math.min(100, (selectedMusicDuration / (session?.requiredMusicSeconds || 1)) * 100)}%`,
+                    height: '100%',
+                    backgroundColor: selectedMusicDuration >= (session?.requiredMusicSeconds || 0) ? 'var(--success)' : 'var(--primary)',
+                    borderRadius: '3px',
+                    transition: 'width 0.3s ease'
+                  }} />
+                </div>
+                {selectedMusicDuration < (session?.requiredMusicSeconds || 0) && (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '6px' }}>
+                    Need {formatDuration((session?.requiredMusicSeconds || 0) - selectedMusicDuration)} more
+                  </p>
+                )}
+                {selectedMusicDuration >= (session?.requiredMusicSeconds || 0) && (
+                  <p style={{ fontSize: '0.8rem', color: 'var(--success)', marginTop: '6px' }}>
+                    ✓ You have enough music!
+                  </p>
+                )}
+              </div>
+              
               <div className="form-group" style={{ marginTop: '16px' }}>
                 <label>Upload Music Files</label>
                 <input 
@@ -568,18 +648,33 @@ function App() {
                         {plexTracks.map((track: any) => {
                           const key = `plex:${track.ratingKey}`;
                           const label = track.artist ? `${track.artist} — ${track.title}` : track.title;
+                          // Format track duration (Plex returns duration in milliseconds)
+                          const trackDuration = track.duration ? Math.round(track.duration / 1000) : 0;
+                          const durationLabel = trackDuration > 0 ? formatDuration(trackDuration) : '';
                           return (
                             <div
                               key={track.ratingKey}
                               className={`music-item ${selectedMusic.includes(key) ? 'selected' : ''}`}
                               onClick={() => toggleMusicSelection(key)}
+                              style={{ justifyContent: 'space-between' }}
                             >
-                              <input
-                                type="checkbox"
-                                checked={selectedMusic.includes(key)}
-                                onChange={() => {}}
-                              />
-                              <span>{label}</span>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flex: 1 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={selectedMusic.includes(key)}
+                                  onChange={() => {}}
+                                />
+                                <span>{label}</span>
+                              </div>
+                              {durationLabel && (
+                                <span style={{ 
+                                  fontSize: '0.8rem', 
+                                  color: 'var(--text-muted)',
+                                  marginLeft: '8px'
+                                }}>
+                                  {durationLabel}
+                                </span>
+                              )}
                             </div>
                           );
                         })}
