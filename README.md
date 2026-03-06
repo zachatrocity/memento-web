@@ -13,12 +13,14 @@ Slideshow videos from Google Photos with music from Plex or uploaded files.
 
 ## Quick Start (Docker Compose)
 
-The easiest way to run:
+The easiest way to run uses the pre-built image from GitHub Container Registry:
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd memento-web
+# Create a directory for your installation
+mkdir memento-web && cd memento-web
+
+# Download the docker-compose file
+curl -O https://raw.githubusercontent.com/zachatrocity/memento-web/main/docker-compose.yml
 
 # Create .env file
 cat > .env << 'EOF'
@@ -29,15 +31,15 @@ SESSION_SECRET=generate-a-random-string
 EOF
 
 # Start the container
-docker compose up --build -d
+docker compose up -d
 ```
 
 The app will be available at `http://localhost:3000` (or your configured domain).
 
 ### Docker Compose Configuration
 
-The included `docker-compose.yml` sets up:
-- Container with FFmpeg and Node.js
+The `docker-compose.yml` sets up:
+- Pre-built image with FFmpeg and Node.js (`ghcr.io/zachatrocity/memento-web:latest`)
 - Persistent volumes for database, uploads, and output
 - Port 3000 exposed
 
@@ -45,7 +47,7 @@ Optional environment variables:
 ```env
 PHOTO_DURATION_SECONDS=4          # Seconds per photo
 TRANSITION_DURATION_SECONDS=1     # Transition duration
-DATA_DIR=/app/data                # Data directory in container
+MUSIC_DIR=/path/to/music          # Host path to music library
 ```
 
 ## Manual Installation

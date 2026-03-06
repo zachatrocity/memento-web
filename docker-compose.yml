@@ -2,9 +2,14 @@ version: '3.8'
 
 services:
   memento-web:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Use pre-built image (recommended)
+    image: ghcr.io/zachatrocity/memento-web:latest
+    
+    # Or build locally (for development):
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    
     container_name: memento-web
     ports:
       - "3000:3000"
