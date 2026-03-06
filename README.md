@@ -1,157 +1,127 @@
 # Memento Web
 
-Create beautiful slideshow videos from your Google Photos with custom music from Plex or uploaded files.
+Slideshow videos from Google Photos with music from Plex or uploaded files.
 
 ## Features
 
-- **Google Photos Integration**: Select photos directly from your Google Photos library using the official Photos Picker API
+- **Google Photos Integration**: Select photos using the Google Photos Picker API
 - **Plex Music Integration**: Browse and select music from your Plex server
-- **Custom Uploads**: Upload your own music files (MP3, WAV, AAC, M4A, FLAC)
-- **Automatic Slideshow Generation**: Creates a video with fade transitions between photos
-- **Persistent Settings**: Plex and Google auth persist across sessions (30-day sessions)
-- **Track Search**: Search for specific tracks in your Plex library
+- **Custom Uploads**: Upload music files (MP3, WAV, AAC, M4A, FLAC)
+- **Slideshow Generation**: Video with fade transitions between photos
+- **Music Duration Tracking**: See how much music you have vs. how much you need
+- **Persistent Settings**: Auth and Plex config persist across sessions
 
-## Prerequisites
+## Quick Start (Docker Compose)
 
-- Node.js 18+ 
-- FFmpeg installed on your system
-- Google OAuth credentials (for Google Photos access)
-- Plex account (optional, for Plex music integration)
-- Music directory mounted at `/music` (optional, for local music library)
+The easiest way to run:
 
-## Installation
-
-1. Clone the repository:
 ```bash
+# Clone the repository
 git clone <repository-url>
 cd memento-web
-```
 
-2. Install dependencies:
-```bash
-npm install
-```
-
-3. Create a `.env` file in the root directory:
-```env
-# Required: Google OAuth credentials
+# Create .env file
+cat > .env << 'EOF'
 GOOGLE_CLIENT_ID=your_google_client_id
 GOOGLE_CLIENT_SECRET=your_google_client_secret
-GOOGLE_REDIRECT_URI=http://localhost:3000/auth/callback
+GOOGLE_REDIRECT_URI=https://your-domain.com/auth/callback
+SESSION_SECRET=generate-a-random-string
+EOF
 
-# Optional: Session secret (generate a random string)
-SESSION_SECRET=your_random_session_secret
-
-# Optional: Directories (defaults shown)
-DATA_DIR=./data
-OUTPUT_DIR=./data/output
-UPLOAD_DIR=./data/uploads
-MUSIC_DIR=/music
-
-# Optional: Photo/transition durations (seconds)
-PHOTO_DURATION_SECONDS=4
-TRANSITION_DURATION_SECONDS=1
-
-# Optional: Frontend URL for redirects
-FRONTEND_URL=http://localhost:5173
+# Start the container
+docker compose up --build -d
 ```
 
-4. Set up Google OAuth:
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select existing
-   - Enable the **Photos Picker API**
-   - Create OAuth 2.0 credentials (Web application type)
-   - Add authorized redirect URI: `http://localhost:3000/auth/callback`
-   - Copy Client ID and Client Secret to your `.env` file
+The app will be available at `http://localhost:3000` (or your configured domain).
 
-5. Start the development server:
+### Docker Compose Configuration
+
+The included `docker-compose.yml` sets up:
+- Container with FFmpeg and Node.js
+- Persistent volumes for database, uploads, and output
+- Port 3000 exposed
+
+Optional environment variables:
+```env
+PHOTO_DURATION_SECONDS=4          # Seconds per photo
+TRANSITION_DURATION_SECONDS=1     # Transition duration
+DATA_DIR=/app/data                # Data directory in container
+```
+
+## Manual Installation
+
+If you prefer not to use Docker:
+
+**Prerequisites:**
+- Node.js 18+
+- FFmpeg installed on your system
+
+**Steps:**
 ```bash
-npm run dev
+npm install
+cp .env.example .env
+# Edit .env with your Google OAuth credentials
+npm run build
+npm start
 ```
 
-This starts both the backend (port 3000) and frontend dev server (port 5173).
+## Google OAuth Setup
+
+Required for Google Photos access:
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project
+3. Enable the **Photos Picker API**
+4. Create OAuth 2.0 credentials (Web application type)
+5. Add authorized redirect URI: `https://your-domain.com/auth/callback`
+6. Copy Client ID and Secret to your `.env` file
 
 ## Usage
 
-1. Open http://localhost:5173 in your browser
+1. Open the app in your browser
 2. Click "Connect Google Photos" to authenticate
-3. Select photos from your Google Photos library
+3. Select photos from your library
 4. Add music:
-   - **Option A**: Connect Plex and browse your music library
-   - **Option B**: Upload music files directly
-   - **Option C**: Use music from the mounted `/music` directory
+   - Connect Plex and browse your library, or
+   - Upload music files directly, or
+   - Use music from the mounted `/music` directory
 5. Click "Create Video" and wait for processing
-6. Download your slideshow video!
+6. Download your video
 
 ## Architecture
 
 - **Backend**: Express.js with TypeScript
 - **Database**: SQLite (better-sqlite3)
 - **Frontend**: React with Vite
-- **Video Processing**: FFmpeg with fluent-ffmpeg
-- **Authentication**: 
-  - Google OAuth 2.0 (Google Photos)
-  - Plex PIN-based auth (Plex Media Server)
-
-## Database Schema
-
-The SQLite database stores:
-- **users**: Google auth tokens and user info
-- **sessions**: Photo selection sessions
-- **photos**: Downloaded photo metadata and paths
-- **videos**: Video generation jobs and status
-- **user_settings**: Persistent Plex configuration
+- **Video Processing**: FFmpeg
+- **Authentication**: Google OAuth 2.0, Plex PIN-based auth
 
 ## Development
 
-### Project Structure
-```
-memento-web/
-├── src/
-│   ├── server.ts              # Express server entry
-│   ├── routes/
-│   │   ├── auth.ts            # Google OAuth routes
-│   │   ├── music.ts           # Plex & music upload routes
-│   │   ├── photos.ts          # Google Photos Picker API
-│   │   ├── settings.ts        # User settings persistence
-│   │   └── video.ts           # Video generation routes
-│   ├── services/
-│   │   └── video-generator.ts # FFmpeg video creation
-│   └── utils/
-│       └── database.ts        # SQLite setup
-├── frontend/
-│   └── src/
-│       └── App.tsx            # Main React app
-└── data/                      # SQLite DB, downloads, uploads, output
+```bash
+# Start dev servers (backend + frontend)
+npm run dev
+
+# Build for production
+npm run build
+
+# Type check
+npx tsc --noEmit
 ```
 
-### Adding Features
-
-The video generation uses a two-pass FFmpeg approach to handle many photos without hitting filtergraph limits:
-1. Create individual segments for each photo with fade transitions
-2. Concatenate segments and add audio
-
-### Troubleshooting
-
-**Video generation fails with "No such file or directory"**
-- Check that all paths in `.env` are absolute or relative to project root
-- Ensure `data/` directory exists and is writable
-
-**Plex connection not persisting**
-- Make sure you're logged in (Google auth must be active)
-- Plex settings are saved per-user in the database
+## Troubleshooting
 
 **SQLite errors on startup**
 - Delete `node_modules/better-sqlite3` and run `npm install`
 - Ensure Node.js version matches the better-sqlite3 binary
 
+**Video generation fails**
+- Check FFmpeg is installed and accessible
+- Ensure output directories are writable
+
+**Plex connection not persisting**
+- Must be logged in with Google auth (settings are per-user)
+
 ## License
 
 MIT
-
-## Contributing
-
-Pull requests welcome! Please ensure:
-- TypeScript compiles without errors (`npx tsc --noEmit`)
-- Code follows existing patterns
-- New features include proper error handling
