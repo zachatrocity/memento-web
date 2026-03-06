@@ -39,6 +39,11 @@ interface PickerMediaItem {
     baseUrl: string;
     mimeType: string;
     filename: string;
+    mediaMetadata?: {
+      video?: {
+        duration: string;
+      };
+    };
   };
 }
 
@@ -96,32 +101,73 @@ const getAccessToken = async (userId: string): Promise<string> => {
 const downloadPhoto = async (photo: PhotoRecord, accessToken: string): Promise<string> => {
   const filename = `${photo.id}.jpg`;
   const filepath = path.join(DOWNLOAD_DIR, filename);
-  
+
   if (fs.existsSync(filepath)) {
     return filepath;
   }
-  
+
   // Build download URL - append =d for full resolution download
   let downloadUrl = photo.base_url;
   if (downloadUrl.includes('googleusercontent.com')) {
     downloadUrl = downloadUrl.split('=')[0] + '=d';
   }
-  
-  const response = await axios.get(downloadUrl, { 
+
+  const response = await axios.get(downloadUrl, {
     responseType: 'stream',
     headers: {
       'Authorization': `Bearer ${accessToken}`
     }
   });
-  
+
   const writer = fs.createWriteStream(filepath);
   response.data.pipe(writer);
-  
+
   await new Promise<void>((resolve, reject) => {
     writer.on('finish', () => resolve());
     writer.on('error', reject);
   });
-  
+
+  return filepath;
+};
+
+// Download media (photo or video)
+const downloadMedia = async (media: any, accessToken: string): Promise<string> => {
+  const isVideo = media.media_type === 'video';
+  const ext = isVideo ? '.mp4' : '.jpg';
+  const filename = `${media.id}${ext}`;
+  const filepath = path.join(DOWNLOAD_DIR, filename);
+
+  if (fs.existsSync(filepath)) {
+    return filepath;
+  }
+
+  // Build download URL
+  let downloadUrl = media.base_url;
+  if (downloadUrl.includes('googleusercontent.com')) {
+    if (isVideo) {
+      // For videos, =dv gets the video download
+      downloadUrl = downloadUrl.split('=')[0] + '=dv';
+    } else {
+      // For photos, =d gets full resolution
+      downloadUrl = downloadUrl.split('=')[0] + '=d';
+    }
+  }
+
+  const response = await axios.get(downloadUrl, {
+    responseType: 'stream',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`
+    }
+  });
+
+  const writer = fs.createWriteStream(filepath);
+  response.data.pipe(writer);
+
+  await new Promise<void>((resolve, reject) => {
+    writer.on('finish', () => resolve());
+    writer.on('error', reject);
+  });
+
   return filepath;
 };
 
@@ -292,22 +338,31 @@ router.post('/picker/import', requireAuth, async (req, res) => {
       VALUES (?, ?, ?, ?, ?)
     `).run(sessionId, req.session.userId, pickerSessionId, 'Selected Photos', mediaItems.length);
     
-    // Store photos in database
+    // Store photos/videos in database
     const insertPhoto = database.prepare(`
-      INSERT INTO photos (id, session_id, google_photo_id, url, base_url, mime_type, width, height, creation_time)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO photos (id, session_id, google_photo_id, url, base_url, mime_type, media_type, width, height, duration_seconds, creation_time)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     
     for (const item of mediaItems) {
+      const mimeType = item.mediaFile?.mimeType || 'image/jpeg';
+      const isVideo = mimeType.startsWith('video/');
+      const mediaType = isVideo ? 'video' : 'photo';
+      // Get video duration if available (Google Photos API provides this for videos)
+      const durationSeconds = item.mediaFile?.mediaMetadata?.video?.duration ? 
+        parseFloat(item.mediaFile.mediaMetadata.video.duration.replace('s', '')) : null;
+      
       insertPhoto.run(
         uuidv4(),
         sessionId,
         item.id,
         item.mediaFile?.baseUrl || '',
         item.mediaFile?.baseUrl || '',
-        item.mediaFile?.mimeType || 'image/jpeg',
+        mimeType,
+        mediaType,
         0,
         0,
+        durationSeconds,
         null
       );
     }
@@ -319,6 +374,9 @@ router.post('/picker/import', requireAuth, async (req, res) => {
         id: p.id,
         baseUrl: p.mediaFile?.baseUrl,
         mimeType: p.mediaFile?.mimeType,
+        mediaType: p.mediaFile?.mimeType?.startsWith('video/') ? 'video' : 'photo',
+        durationSeconds: p.mediaFile?.mediaMetadata?.video?.duration ? 
+          parseFloat(p.mediaFile.mediaMetadata.video.duration.replace('s', '')) : null,
         filename: p.mediaFile?.filename
       }))
     });
@@ -339,12 +397,12 @@ router.post('/process', requireAuth, async (req, res) => {
     const accessToken = await getAccessToken(req.session.userId!);
     const database = db.get();
     
-    // Get photos for this session
+    // Get photos and videos for this session
     const photos = database.prepare(
-      'SELECT id, base_url FROM photos WHERE session_id = ?'
-    ).all(sessionId) as PhotoRecord[];
+      'SELECT id, base_url, mime_type, media_type, duration_seconds FROM photos WHERE session_id = ?'
+    ).all(sessionId) as any[];
 
-    console.log(`Processing ${photos.length} photos for session ${sessionId}`);
+    console.log(`Processing ${photos.length} media items for session ${sessionId}`);
     
     const updatePhoto = database.prepare(`
       UPDATE photos SET is_selected = 1, is_dupe = 0 WHERE id = ?
@@ -355,27 +413,46 @@ router.post('/process', requireAuth, async (req, res) => {
     `);
 
     let downloadedCount = 0;
+    let videoDurationTotal = 0;
+    
     for (const photo of photos) {
       updatePhoto.run(photo.id);
       
+      // Track video duration for music calculation
+      if (photo.media_type === 'video' && photo.duration_seconds) {
+        videoDurationTotal += photo.duration_seconds;
+      }
+      
       if (photo.base_url && photo.base_url.length > 0) {
         try {
-          const downloadPath = await downloadPhoto(photo, accessToken);
+          const downloadPath = await downloadMedia(photo, accessToken);
           updateDownloadPath.run(downloadPath, photo.id);
           downloadedCount++;
-          console.log(`Downloaded photo ${downloadedCount}/${photos.length}`);
+          console.log(`Downloaded media ${downloadedCount}/${photos.length}`);
         } catch (error) {
-          console.error(`Failed to download photo ${photo.id}:`, error);
+          console.error(`Failed to download media ${photo.id}:`, error);
         }
       }
     }
 
-    console.log(`Downloaded ${downloadedCount} of ${photos.length} photos`);
+    console.log(`Downloaded ${downloadedCount} of ${photos.length} media items`);
     
     // Calculate required music duration
+    // Photos: PHOTO_DURATION + TRANSITION_DURATION each
+    // Videos: actual video duration (no transitions between internal video segments)
     const PHOTO_DURATION = parseInt(process.env.PHOTO_DURATION_SECONDS || '4');
-    const TRANSITION_DURATION = parseInt(process.env.TRANSITION_DURATION_SECONDS || '1');
-    const totalDuration = photos.length * (PHOTO_DURATION + TRANSITION_DURATION);
+    const TRANSITION_DURATION = parseFloat(process.env.TRANSITION_DURATION_SECONDS || '1');
+    
+    const photoCount = photos.filter(p => p.media_type !== 'video').length;
+    const videoCount = photos.filter(p => p.media_type === 'video').length;
+    
+    // Photos contribute PHOTO_DURATION each + transitions between items
+    // Videos contribute their actual duration
+    const photoTime = photoCount * PHOTO_DURATION;
+    const transitionTime = Math.max(0, photos.length - 1) * TRANSITION_DURATION;
+    const totalDuration = photoTime + videoDurationTotal + transitionTime;
+    
+    console.log(`Duration calc: ${photoCount} photos × ${PHOTO_DURATION}s + ${videoCount} videos × ~${Math.round(videoDurationTotal)}s + ${transitionTime}s transitions = ${Math.round(totalDuration)}s total`);
     
     // Update session
     database.prepare(`
@@ -386,10 +463,13 @@ router.post('/process', requireAuth, async (req, res) => {
     res.json({
       sessionId,
       originalCount: photos.length,
+      photoCount: photoCount,
+      videoCount: videoCount,
+      videoDurationSeconds: Math.round(videoDurationTotal),
       duplicateCount: 0,
       selectedCount: photos.length,
       requiredMusicMinutes: Math.ceil(totalDuration / 60),
-      requiredMusicSeconds: totalDuration
+      requiredMusicSeconds: Math.round(totalDuration)
     });
   } catch (error) {
     console.error('Error processing photos:', error);

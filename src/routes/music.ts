@@ -194,7 +194,12 @@ router.get('/plex/servers', async (req, res) => {
     const servers = resources
       .filter(r => r.provides?.includes('server'))
       .map(r => {
-        const connection = (r.connections || []).find((c: any) => c.uri?.startsWith('https://')) || r.connections?.[0];
+        const connections = r.connections || [];
+        // Prefer relay (works from anywhere), then HTTPS direct, then HTTP
+        const connection = 
+          connections.find((c: any) => c.relay) ||
+          connections.find((c: any) => c.uri?.startsWith('https://')) ||
+          connections[0];
         return {
           id: r.clientIdentifier,
           name: r.name,

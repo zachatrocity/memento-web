@@ -435,18 +435,20 @@ function App() {
           </div>
         ) : currentStep === 'picker' ? (
           <div className="card empty-state">
-            <h2>Select Photos</h2>
-            <p>Click the button below to open Google Photos and select the photos you want to include in your slideshow.</p>
+            <h2>Select Photos & Videos</h2>
+            <p>Click the button below to open Google Photos and select photos and videos you want to include in your slideshow.</p>
             <button onClick={startPhotoPicker} className="btn btn-primary" style={{ marginTop: '20px' }}>
-              Select Photos from Google Photos
+              Select Media from Google Photos
             </button>
           </div>
         ) : currentStep === 'photos' ? (
           <>
             <div className="card">
-              <h2>Selected Photos</h2>
+              <h2>Selected Media</h2>
               <p style={{ color: 'var(--text-muted)' }}>
-                Original: {session?.photoCount} photos • 
+                {session?.photoCount > 0 && `${session?.photoCount} photos `}
+                {session?.videoCount > 0 && `${session?.videoCount} videos `}
+                • 
                 Selected: {session?.selectedCount} photos •
                 Duplicates removed: {session?.duplicateCount}
               </p>

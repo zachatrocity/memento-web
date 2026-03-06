@@ -35,22 +35,22 @@ export class VideoGenerator {
 
   async createVideo(job: VideoJob): Promise<string> {
     const database = db.get();
-    
-    // Get selected photos for this session
-    const photos = database.prepare(`
-      SELECT * FROM photos 
+
+    // Get selected photos AND videos for this session
+    const mediaItems = database.prepare(`
+      SELECT * FROM photos
       WHERE session_id = ? AND is_selected = 1
       ORDER BY creation_time ASC
     `).all(job.sessionId) as any[];
 
-    if (photos.length === 0) {
-      throw new Error('No photos selected for video');
+    if (mediaItems.length === 0) {
+      throw new Error('No photos or videos selected for video');
     }
 
     const videoId = job.videoId || uuidv4();
     const outputPath = path.join(OUTPUT_DIR, `${videoId}.mp4`);
     const tempDir = path.join(OUTPUT_DIR, videoId);
-    
+
     try {
       // Create temp directory
       if (!fs.existsSync(tempDir)) {
@@ -63,25 +63,32 @@ export class VideoGenerator {
         VALUES (?, ?, 'processing', ?)
       `).run(videoId, job.sessionId, outputPath);
 
-      // Prepare photos (normalize to same size)
-      console.log(`Preparing ${photos.length} photos...`);
-      const preparedPhotos = await this.preparePhotos(photos, tempDir);
+      // Separate photos and videos
+      const photos = mediaItems.filter(m => m.media_type !== 'video');
+      const videos = mediaItems.filter(m => m.media_type === 'video');
+      console.log(`Preparing ${photos.length} photos and ${videos.length} videos...`);
+
+      // Prepare media (normalize photos to same size, copy videos)
+      const preparedMedia = await this.prepareMixedMedia(mediaItems, tempDir);
+
+      // Calculate total duration for audio (photos + videos)
+      const totalDuration = this.calculateTotalDuration(mediaItems);
 
       // Concatenate music files
       console.log('Processing audio...');
-      const audioPath = await this.prepareAudio(job.musicFiles, tempDir, photos.length, job.plex);
+      const audioPath = await this.prepareAudio(job.musicFiles, tempDir, totalDuration, job.plex);
 
       // Build ffmpeg command for slideshow
       console.log('Generating video...');
-      await this.buildSlideshow(preparedPhotos, audioPath, outputPath, job, tempDir);
+      await this.buildMixedSlideshow(preparedMedia, audioPath, outputPath, job, tempDir);
 
       // Update video status
       const stats = fs.statSync(outputPath);
       database.prepare(`
-        UPDATE videos 
-        SET status = 'complete', file_size = ?
+        UPDATE videos
+        SET status = 'complete', file_size = ?, duration_seconds = ?
         WHERE id = ?
-      `).run(stats.size, videoId);
+      `).run(stats.size, Math.round(totalDuration), videoId);
 
       // Cleanup temp files
       this.cleanup(tempDir);
@@ -92,11 +99,11 @@ export class VideoGenerator {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       console.error(`Video generation error for ${videoId}:`, errorMessage);
-      
+
       database.prepare(`
         UPDATE videos SET status = 'error', error_message = ? WHERE id = ?
       `).run(errorMessage.substring(0, 500), videoId);
-      
+
       this.cleanup(tempDir);
       job.onError?.(error as Error);
       throw error;
@@ -105,11 +112,11 @@ export class VideoGenerator {
 
   private async preparePhotos(photos: any[], tempDir: string): Promise<string[]> {
     const prepared: string[] = [];
-    
+
     for (let i = 0; i < photos.length; i++) {
       const photo = photos[i];
       const outputPath = path.join(tempDir, `photo_${i.toString().padStart(4, '0')}.jpg`);
-      
+
       // Copy and optimize photo
       await new Promise<void>((resolve, reject) => {
         ffmpeg(photo.downloaded_path)
@@ -120,21 +127,222 @@ export class VideoGenerator {
           .on('error', reject)
           .run();
       });
-      
+
       prepared.push(outputPath);
     }
-    
+
     return prepared;
+  }
+
+  private calculateTotalDuration(mediaItems: any[]): number {
+    let duration = 0;
+    const TRANSITION_DURATION = parseFloat(process.env.TRANSITION_DURATION_SECONDS || '1');
+    const PHOTO_DURATION = parseInt(process.env.PHOTO_DURATION_SECONDS || '4');
+
+    for (let i = 0; i < mediaItems.length; i++) {
+      const item = mediaItems[i];
+      if (item.media_type === 'video' && item.duration_seconds) {
+        // Videos use their actual duration
+        duration += item.duration_seconds;
+      } else {
+        // Photos use fixed duration
+        duration += PHOTO_DURATION;
+      }
+      // Add transition time between items (except after the last one)
+      if (i < mediaItems.length - 1) {
+        duration += TRANSITION_DURATION;
+      }
+    }
+
+    return duration;
+  }
+
+  private async prepareMixedMedia(mediaItems: any[], tempDir: string): Promise<{ type: 'photo' | 'video'; path: string; duration?: number }[]> {
+    const prepared: { type: 'photo' | 'video'; path: string; duration?: number }[] = [];
+    const PHOTO_DURATION = parseInt(process.env.PHOTO_DURATION_SECONDS || '4');
+
+    for (let i = 0; i < mediaItems.length; i++) {
+      const item = mediaItems[i];
+      const isVideo = item.media_type === 'video';
+
+      if (isVideo) {
+        // For videos: re-encode to ensure consistent format and 1920x1080
+        const outputPath = path.join(tempDir, `media_${i.toString().padStart(4, '0')}.mp4`);
+        const videoDuration = item.duration_seconds || 5;
+
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(item.downloaded_path)
+            .videoFilter('scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black')
+            .outputOptions([
+              '-c:v libx264',
+              '-preset medium',
+              '-crf 23',
+              '-pix_fmt yuv420p',
+              '-c:a aac',
+              '-b:a 128k'
+            ])
+            .output(outputPath)
+            .on('end', () => resolve())
+            .on('error', reject)
+            .run();
+        });
+
+        prepared.push({ type: 'video', path: outputPath, duration: videoDuration });
+      } else {
+        // For photos: create a short video clip from the image
+        const outputPath = path.join(tempDir, `media_${i.toString().padStart(4, '0')}.mp4`);
+
+        await new Promise<void>((resolve, reject) => {
+          ffmpeg(item.downloaded_path)
+            .loop(1)
+            .duration(PHOTO_DURATION)
+            .videoFilter('scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,format=pix_fmts=yuv420p')
+            .outputOptions([
+              '-c:v libx264',
+              '-preset medium',
+              '-crf 23',
+              '-pix_fmt yuv420p',
+              '-movflags +faststart'
+            ])
+            .output(outputPath)
+            .on('end', () => resolve())
+            .on('error', reject)
+            .run();
+        });
+
+        prepared.push({ type: 'photo', path: outputPath, duration: PHOTO_DURATION });
+      }
+    }
+
+    return prepared;
+  }
+
+  private async buildMixedSlideshow(
+    media: { type: 'photo' | 'video'; path: string; duration?: number }[],
+    audioPath: string,
+    outputPath: string,
+    job: VideoJob,
+    tempDir: string
+  ): Promise<void> {
+    const TRANSITION_DURATION = parseFloat(process.env.TRANSITION_DURATION_SECONDS || '1');
+
+    // Create segments with transitions
+    const segmentDir = path.resolve(tempDir, 'segments');
+    if (!fs.existsSync(segmentDir)) {
+      fs.mkdirSync(segmentDir, { recursive: true });
+    }
+
+    const segments: string[] = [];
+
+    for (let i = 0; i < media.length; i++) {
+      const item = media[i];
+      const segmentPath = path.resolve(segmentDir, `segment_${i.toString().padStart(4, '0')}.mp4`);
+      const isLast = i === media.length - 1;
+
+      // Calculate duration including transition (except for last item)
+      const baseDuration = item.duration || 4;
+      const segmentDuration = isLast ? baseDuration : baseDuration + TRANSITION_DURATION;
+
+      await new Promise<void>((resolve, reject) => {
+        let fadeFilter = '';
+
+        if (!isLast) {
+          // Add fade out at the end of this segment (during the transition period)
+          fadeFilter = `,fade=t=out:st=${baseDuration}:d=${TRANSITION_DURATION}`;
+        }
+
+        ffmpeg(item.path)
+          .seekInput(0)
+          .duration(segmentDuration)
+          .videoFilter(`format=pix_fmts=yuv420p${fadeFilter}`)
+          .outputOptions([
+            '-c:v libx264',
+            '-preset medium',
+            '-crf 23',
+            '-pix_fmt yuv420p',
+            '-movflags +faststart'
+          ])
+          .output(segmentPath)
+          .on('end', () => resolve())
+          .on('error', (err) => {
+            console.error('Segment creation error:', err);
+            reject(err);
+          })
+          .run();
+      });
+
+      segments.push(segmentPath);
+    }
+
+    // Build concat list file with absolute paths
+    const concatListPath = path.resolve(tempDir, 'video_concat.txt');
+    let concatContent = '';
+    for (const segment of segments) {
+      const absPath = path.resolve(segment);
+      concatContent += `file '${absPath.replace(/'/g, "'\\''")}'\n`;
+    }
+    fs.writeFileSync(concatListPath, concatContent);
+    console.log('Created concat list:', concatListPath);
+
+    // Concatenate all segments with audio
+    return new Promise((resolve, reject) => {
+      const videoOnlyPath = path.resolve(tempDir, 'video_noaudio.mp4');
+
+      // First pass: concatenate segments (video only)
+      ffmpeg()
+        .input(concatListPath)
+        .inputOptions(['-f concat', '-safe 0'])
+        .outputOptions([
+          '-c:v libx264',
+          '-preset medium',
+          '-crf 23',
+          '-pix_fmt yuv420p',
+          '-movflags +faststart'
+        ])
+        .output(videoOnlyPath)
+        .on('end', () => {
+          // Second pass: add audio
+          ffmpeg(videoOnlyPath)
+            .input(audioPath)
+            .outputOptions([
+              '-c:v copy',
+              '-c:a aac',
+              '-b:a 192k',
+              '-shortest',
+              '-movflags +faststart'
+            ])
+            .output(outputPath)
+            .on('start', (cmd) => {
+              console.log('FFmpeg final pass command:', cmd);
+            })
+            .on('progress', (progress) => {
+              console.log('Processing: ' + progress.percent?.toFixed(2) + '% done');
+              job.onProgress?.(progress.percent || 0);
+            })
+            .on('end', () => {
+              console.log('Video created:', outputPath);
+              resolve();
+            })
+            .on('error', (err) => {
+              console.error('FFmpeg error:', err);
+              reject(err);
+            })
+            .run();
+        })
+        .on('error', (err) => {
+          console.error('FFmpeg concat error:', err);
+          reject(err);
+        })
+        .run();
+    });
   }
 
   private async prepareAudio(
     musicFiles: string[],
     tempDir: string,
-    photoCount: number,
+    requiredDuration: number,
     plex?: { serverUri: string; token: string; clientId?: string }
   ): Promise<string> {
-    // Calculate required duration
-    const requiredDuration = photoCount * (PHOTO_DURATION + TRANSITION_DURATION);
     const outputPath = path.join(tempDir, 'audio.mp3');
     
     const resolvedFiles = await this.resolveMusicFiles(musicFiles, tempDir, plex);
